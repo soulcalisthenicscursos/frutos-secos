@@ -2,40 +2,17 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import type { Product } from './types'
 import { AuthError, requireBasicAuth } from './_auth'
 import { SEED_PRODUCTS } from './_seed'
-import { getSupabaseAdmin } from './supabaseAdmin'
-
-type ProductRow = {
-  id: string
-  name: string
-  price: number | string
-  description: string | null
-  image_url: string
-  category: string | null
-}
-
-function rowToProduct(row: ProductRow): Product {
-  const price =
-    typeof row.price === 'string' ? Number.parseFloat(row.price) : row.price
-  return {
-    id: row.id,
-    name: row.name,
-    price: Number.isFinite(price) ? price : 0,
-    description: row.description ?? '',
-    imageUrl: row.image_url,
-    category: row.category?.trim() ? row.category : 'General',
-  }
-}
-
-function productToRow(p: Product): Record<string, unknown> {
-  return {
-    id: p.id,
-    name: p.name,
-    price: p.price,
-    description: p.description,
-    image_url: p.imageUrl,
-    category: p.category,
-  }
-}
+import {
+  getSupabaseEnv,
+  productToRow,
+  restDeleteProduct,
+  restGetProductId,
+  restHasAnyProduct,
+  restInsertProducts,
+  restListProducts,
+  restUpdateProduct,
+  restUpsertProduct,
+} from './supabaseRest'
 
 function stringifySupabaseError(e: unknown): string {
   if (e && typeof e === 'object') {
@@ -56,26 +33,11 @@ function errPayload(e: unknown): { error: string } {
   return { error: stringifySupabaseError(e) }
 }
 
-async function listProducts(
-  supabase: ReturnType<typeof getSupabaseAdmin>
-): Promise<Product[]> {
-  const { data, error } = await supabase
-    .from('products')
-    .select('*')
-    .order('created_at', { ascending: true })
-  if (error) throw error
-  return (data as ProductRow[] | null)?.map(rowToProduct) ?? []
-}
-
-async function seedIfEmpty(
-  supabase: ReturnType<typeof getSupabaseAdmin>
-): Promise<void> {
-  const { data, error } = await supabase.from('products').select('id').limit(1)
-  if (error) throw error
-  if (data && data.length > 0) return
+async function seedIfEmpty(baseUrl: string, key: string): Promise<void> {
+  const has = await restHasAnyProduct(baseUrl, key)
+  if (has) return
   const rows = SEED_PRODUCTS.map((p) => productToRow(p))
-  const { error: insErr } = await supabase.from('products').insert(rows)
-  if (insErr) throw insErr
+  await restInsertProducts(baseUrl, key, rows)
 }
 
 function parseJsonBody(req: VercelRequest): unknown {
@@ -98,9 +60,10 @@ function sendJson(res: VercelResponse, status: number, body: unknown): void {
 }
 
 async function handle(req: VercelRequest, res: VercelResponse): Promise<void> {
-  let supabase: ReturnType<typeof getSupabaseAdmin>
+  let baseUrl: string
+  let key: string
   try {
-    supabase = getSupabaseAdmin()
+    ;({ baseUrl, key } = getSupabaseEnv())
   } catch (e) {
     if (e instanceof Error && e.message === 'MISSING_SUPABASE_ENV') {
       sendJson(res, 500, {
@@ -115,8 +78,8 @@ async function handle(req: VercelRequest, res: VercelResponse): Promise<void> {
 
   if (req.method === 'GET') {
     try {
-      await seedIfEmpty(supabase)
-      const list = await listProducts(supabase)
+      await seedIfEmpty(baseUrl, key)
+      const list = await restListProducts(baseUrl, key)
       sendJson(res, 200, list)
       return
     } catch (e) {
@@ -152,16 +115,17 @@ async function handle(req: VercelRequest, res: VercelResponse): Promise<void> {
       sendJson(res, 400, { error: 'Bad Request' })
       return
     }
-    const { error } = await supabase
-      .from('products')
-      .upsert(productToRow(body.product), { onConflict: 'id' })
-    if (error) {
-      console.error(error)
-      sendJson(res, 500, { error: error.message, details: stringifySupabaseError(error) })
-      return
+    try {
+      await restUpsertProduct(baseUrl, key, productToRow(body.product))
+      const list = await restListProducts(baseUrl, key)
+      sendJson(res, 200, list)
+    } catch (e) {
+      console.error(e)
+      sendJson(res, 500, {
+        error: stringifySupabaseError(e),
+        details: stringifySupabaseError(e),
+      })
     }
-    const list = await listProducts(supabase)
-    sendJson(res, 200, list)
     return
   }
 
@@ -171,31 +135,19 @@ async function handle(req: VercelRequest, res: VercelResponse): Promise<void> {
       sendJson(res, 400, { error: 'Bad Request' })
       return
     }
-    const { data: existing, error: exErr } = await supabase
-      .from('products')
-      .select('id')
-      .eq('id', body.product.id)
-      .maybeSingle()
-    if (exErr) {
-      console.error(exErr)
-      sendJson(res, 500, { error: exErr.message })
-      return
+    try {
+      const exists = await restGetProductId(baseUrl, key, body.product.id)
+      if (!exists) {
+        sendJson(res, 404, { error: 'Not Found' })
+        return
+      }
+      await restUpdateProduct(baseUrl, key, body.product.id, productToRow(body.product))
+      const list = await restListProducts(baseUrl, key)
+      sendJson(res, 200, list)
+    } catch (e) {
+      console.error(e)
+      sendJson(res, 500, { error: stringifySupabaseError(e) })
     }
-    if (!existing) {
-      sendJson(res, 404, { error: 'Not Found' })
-      return
-    }
-    const { error } = await supabase
-      .from('products')
-      .update(productToRow(body.product))
-      .eq('id', body.product.id)
-    if (error) {
-      console.error(error)
-      sendJson(res, 500, { error: error.message })
-      return
-    }
-    const list = await listProducts(supabase)
-    sendJson(res, 200, list)
     return
   }
 
@@ -206,14 +158,14 @@ async function handle(req: VercelRequest, res: VercelResponse): Promise<void> {
       sendJson(res, 400, { error: 'Bad Request' })
       return
     }
-    const { error } = await supabase.from('products').delete().eq('id', id)
-    if (error) {
-      console.error(error)
-      sendJson(res, 500, { error: error.message })
-      return
+    try {
+      await restDeleteProduct(baseUrl, key, id)
+      const list = await restListProducts(baseUrl, key)
+      sendJson(res, 200, list)
+    } catch (e) {
+      console.error(e)
+      sendJson(res, 500, { error: stringifySupabaseError(e) })
     }
-    const list = await listProducts(supabase)
-    sendJson(res, 200, list)
     return
   }
 
