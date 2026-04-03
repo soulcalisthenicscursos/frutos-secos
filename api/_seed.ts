@@ -1,4 +1,4 @@
-import type { Product } from '../src/types'
+import type { Product } from './types'
 
 export const SEED_PRODUCTS: Product[] = [
   {
@@ -34,4 +34,3 @@ export const SEED_PRODUCTS: Product[] = [
     category: 'Desecados',
   },
 ]
-

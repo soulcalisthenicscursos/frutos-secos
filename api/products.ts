@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import type { Product } from '../src/types'
+import type { Product } from './types'
 import { AuthError, requireBasicAuth } from './_auth'
 import { SEED_PRODUCTS } from './_seed'
 import { getSupabaseAdmin } from './supabaseAdmin'
@@ -37,12 +37,23 @@ function productToRow(p: Product): Record<string, unknown> {
   }
 }
 
-function errPayload(e: unknown): { error: string } {
-  if (e && typeof e === 'object' && 'message' in e) {
-    const m = (e as { message: unknown }).message
-    return { error: typeof m === 'string' ? m : String(m) }
+function stringifySupabaseError(e: unknown): string {
+  if (e && typeof e === 'object') {
+    const o = e as Record<string, unknown>
+    const parts = [
+      o.message,
+      o.details,
+      o.hint,
+      o.code,
+    ].filter((x) => typeof x === 'string' && x.length > 0)
+    if (parts.length) return parts.join(' — ')
   }
-  return { error: String(e) }
+  if (e instanceof Error) return e.message
+  return String(e)
+}
+
+function errPayload(e: unknown): { error: string } {
+  return { error: stringifySupabaseError(e) }
 }
 
 async function listProducts(
@@ -59,14 +70,12 @@ async function listProducts(
 async function seedIfEmpty(
   supabase: ReturnType<typeof getSupabaseAdmin>
 ): Promise<void> {
-  const { count, error: countError } = await supabase
-    .from('products')
-    .select('*', { count: 'exact', head: true })
-  if (countError) throw countError
-  if ((count ?? 0) > 0) return
-  const rows = SEED_PRODUCTS.map((p) => productToRow(p))
-  const { error } = await supabase.from('products').insert(rows)
+  const { data, error } = await supabase.from('products').select('id').limit(1)
   if (error) throw error
+  if (data && data.length > 0) return
+  const rows = SEED_PRODUCTS.map((p) => productToRow(p))
+  const { error: insErr } = await supabase.from('products').insert(rows)
+  if (insErr) throw insErr
 }
 
 function parseJsonBody(req: VercelRequest): unknown {
@@ -82,22 +91,25 @@ function parseJsonBody(req: VercelRequest): unknown {
   return null
 }
 
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-): Promise<void> {
+function sendJson(res: VercelResponse, status: number, body: unknown): void {
+  res.status(status)
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.end(JSON.stringify(body))
+}
+
+async function handle(req: VercelRequest, res: VercelResponse): Promise<void> {
   let supabase: ReturnType<typeof getSupabaseAdmin>
   try {
     supabase = getSupabaseAdmin()
   } catch (e) {
     if (e instanceof Error && e.message === 'MISSING_SUPABASE_ENV') {
-      res.status(500).json({
+      sendJson(res, 500, {
         error:
           'Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en Vercel (Settings → Environment Variables).',
       })
       return
     }
-    res.status(500).json(errPayload(e))
+    sendJson(res, 500, errPayload(e))
     return
   }
 
@@ -105,18 +117,14 @@ export default async function handler(
     try {
       await seedIfEmpty(supabase)
       const list = await listProducts(supabase)
-      res.status(200).json(list)
+      sendJson(res, 200, list)
       return
     } catch (e) {
       console.error(e)
-      const msg =
-        e && typeof e === 'object' && 'message' in e
-          ? String((e as { message: unknown }).message)
-          : String(e)
-      res.status(500).json({
+      sendJson(res, 500, {
         error:
-          'No se pudo leer la base. Revisá: tabla public.products (SQL), claves de Supabase (service_role JWT o sb_secret) y SUPABASE_URL.',
-        details: msg,
+          'No se pudo leer la base. Ejecutá el SQL de supabase/migrations/001_products.sql y revisá las env vars.',
+        details: stringifySupabaseError(e),
       })
       return
     }
@@ -131,17 +139,17 @@ export default async function handler(
           res.setHeader(k, v)
         }
       }
-      res.status(e.statusCode).json({ error: e.message })
+      sendJson(res, e.statusCode, { error: e.message })
       return
     }
-    res.status(500).json(errPayload(e))
+    sendJson(res, 500, errPayload(e))
     return
   }
 
   if (req.method === 'POST') {
     const body = parseJsonBody(req) as { product?: Product } | null
     if (!body?.product) {
-      res.status(400).json({ error: 'Bad Request' })
+      sendJson(res, 400, { error: 'Bad Request' })
       return
     }
     const { error } = await supabase
@@ -149,18 +157,18 @@ export default async function handler(
       .upsert(productToRow(body.product), { onConflict: 'id' })
     if (error) {
       console.error(error)
-      res.status(500).json({ error: error.message })
+      sendJson(res, 500, { error: error.message, details: stringifySupabaseError(error) })
       return
     }
     const list = await listProducts(supabase)
-    res.status(200).json(list)
+    sendJson(res, 200, list)
     return
   }
 
   if (req.method === 'PUT') {
     const body = parseJsonBody(req) as { product?: Product } | null
     if (!body?.product) {
-      res.status(400).json({ error: 'Bad Request' })
+      sendJson(res, 400, { error: 'Bad Request' })
       return
     }
     const { data: existing, error: exErr } = await supabase
@@ -170,11 +178,11 @@ export default async function handler(
       .maybeSingle()
     if (exErr) {
       console.error(exErr)
-      res.status(500).json({ error: exErr.message })
+      sendJson(res, 500, { error: exErr.message })
       return
     }
     if (!existing) {
-      res.status(404).json({ error: 'Not Found' })
+      sendJson(res, 404, { error: 'Not Found' })
       return
     }
     const { error } = await supabase
@@ -183,11 +191,11 @@ export default async function handler(
       .eq('id', body.product.id)
     if (error) {
       console.error(error)
-      res.status(500).json({ error: error.message })
+      sendJson(res, 500, { error: error.message })
       return
     }
     const list = await listProducts(supabase)
-    res.status(200).json(list)
+    sendJson(res, 200, list)
     return
   }
 
@@ -195,19 +203,40 @@ export default async function handler(
     const body = parseJsonBody(req) as { id?: string } | null
     const id = body?.id
     if (!id) {
-      res.status(400).json({ error: 'Bad Request' })
+      sendJson(res, 400, { error: 'Bad Request' })
       return
     }
     const { error } = await supabase.from('products').delete().eq('id', id)
     if (error) {
       console.error(error)
-      res.status(500).json({ error: error.message })
+      sendJson(res, 500, { error: error.message })
       return
     }
     const list = await listProducts(supabase)
-    res.status(200).json(list)
+    sendJson(res, 200, list)
     return
   }
 
-  res.status(405).send('Method Not Allowed')
+  res.status(405).setHeader('content-type', 'text/plain; charset=utf-8')
+  res.end('Method Not Allowed')
+}
+
+export default async function handler(
+  req: VercelRequest,
+  res: VercelResponse
+): Promise<void> {
+  try {
+    await handle(req, res)
+  } catch (e) {
+    console.error('api/products unhandled', e)
+    try {
+      sendJson(res, 500, {
+        error: 'Error interno en /api/products',
+        details: stringifySupabaseError(e),
+      })
+    } catch {
+      res.statusCode = 500
+      res.end('Internal Server Error')
+    }
+  }
 }
