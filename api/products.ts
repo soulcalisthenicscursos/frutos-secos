@@ -1,5 +1,6 @@
+import type { VercelRequest, VercelResponse } from '@vercel/node'
 import type { Product } from '../src/types'
-import { requireBasicAuth } from './_auth'
+import { AuthError, requireBasicAuth } from './_auth'
 import { SEED_PRODUCTS } from './_seed'
 import { getSupabaseAdmin } from './supabaseAdmin'
 
@@ -36,7 +37,17 @@ function productToRow(p: Product): Record<string, unknown> {
   }
 }
 
-async function listProducts(supabase: ReturnType<typeof getSupabaseAdmin>): Promise<Product[]> {
+function errPayload(e: unknown): { error: string } {
+  if (e && typeof e === 'object' && 'message' in e) {
+    const m = (e as { message: unknown }).message
+    return { error: typeof m === 'string' ? m : String(m) }
+  }
+  return { error: String(e) }
+}
+
+async function listProducts(
+  supabase: ReturnType<typeof getSupabaseAdmin>
+): Promise<Product[]> {
   const { data, error } = await supabase
     .from('products')
     .select('*')
@@ -45,7 +56,9 @@ async function listProducts(supabase: ReturnType<typeof getSupabaseAdmin>): Prom
   return (data as ProductRow[] | null)?.map(rowToProduct) ?? []
 }
 
-async function seedIfEmpty(supabase: ReturnType<typeof getSupabaseAdmin>): Promise<void> {
+async function seedIfEmpty(
+  supabase: ReturnType<typeof getSupabaseAdmin>
+): Promise<void> {
   const { count, error: countError } = await supabase
     .from('products')
     .select('*', { count: 'exact', head: true })
@@ -56,58 +69,100 @@ async function seedIfEmpty(supabase: ReturnType<typeof getSupabaseAdmin>): Promi
   if (error) throw error
 }
 
-export default async function handler(req: Request): Promise<Response> {
-  const supabase = getSupabaseAdmin()
+function parseJsonBody(req: VercelRequest): unknown {
+  if (req.body == null) return null
+  if (typeof req.body === 'object') return req.body
+  if (typeof req.body === 'string') {
+    try {
+      return JSON.parse(req.body) as unknown
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+export default async function handler(
+  req: VercelRequest,
+  res: VercelResponse
+): Promise<void> {
+  let supabase: ReturnType<typeof getSupabaseAdmin>
+  try {
+    supabase = getSupabaseAdmin()
+  } catch (e) {
+    if (e instanceof Error && e.message === 'MISSING_SUPABASE_ENV') {
+      res.status(500).json({
+        error:
+          'Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en Vercel (Settings → Environment Variables).',
+      })
+      return
+    }
+    res.status(500).json(errPayload(e))
+    return
+  }
 
   if (req.method === 'GET') {
     try {
       await seedIfEmpty(supabase)
-    } catch (e) {
-      console.error(e)
-      return new Response(
-        JSON.stringify({
-          error:
-            'No se pudo leer la base. ¿Creaste la tabla products y las variables de entorno?',
-        }),
-        { status: 500, headers: { 'content-type': 'application/json' } }
-      )
-    }
-    try {
       const list = await listProducts(supabase)
-      return Response.json(list)
+      res.status(200).json(list)
+      return
     } catch (e) {
       console.error(e)
-      return new Response(JSON.stringify({ error: 'Error al listar productos' }), {
-        status: 500,
-        headers: { 'content-type': 'application/json' },
+      const msg =
+        e && typeof e === 'object' && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e)
+      res.status(500).json({
+        error:
+          'No se pudo leer la base. Revisá: tabla public.products (SQL), claves de Supabase (service_role JWT o sb_secret) y SUPABASE_URL.',
+        details: msg,
       })
+      return
     }
   }
 
   try {
     requireBasicAuth(req)
-  } catch (res) {
-    if (res instanceof Response) return res
-    return new Response('Unauthorized', { status: 401 })
+  } catch (e) {
+    if (e instanceof AuthError) {
+      if (e.extraHeaders) {
+        for (const [k, v] of Object.entries(e.extraHeaders)) {
+          res.setHeader(k, v)
+        }
+      }
+      res.status(e.statusCode).json({ error: e.message })
+      return
+    }
+    res.status(500).json(errPayload(e))
+    return
   }
 
   if (req.method === 'POST') {
-    const body = (await req.json().catch(() => null)) as { product?: Product } | null
-    if (!body?.product) return new Response('Bad Request', { status: 400 })
+    const body = parseJsonBody(req) as { product?: Product } | null
+    if (!body?.product) {
+      res.status(400).json({ error: 'Bad Request' })
+      return
+    }
     const { error } = await supabase
       .from('products')
       .upsert(productToRow(body.product), { onConflict: 'id' })
     if (error) {
       console.error(error)
-      return new Response(JSON.stringify({ error: error.message }), { status: 500 })
+      res.status(500).json({ error: error.message })
+      return
     }
     const list = await listProducts(supabase)
-    return Response.json(list)
+    res.status(200).json(list)
+    return
   }
 
   if (req.method === 'PUT') {
-    const body = (await req.json().catch(() => null)) as { product?: Product } | null
-    if (!body?.product) return new Response('Bad Request', { status: 400 })
+    const body = parseJsonBody(req) as { product?: Product } | null
+    if (!body?.product) {
+      res.status(400).json({ error: 'Bad Request' })
+      return
+    }
     const { data: existing, error: exErr } = await supabase
       .from('products')
       .select('id')
@@ -115,33 +170,44 @@ export default async function handler(req: Request): Promise<Response> {
       .maybeSingle()
     if (exErr) {
       console.error(exErr)
-      return new Response(JSON.stringify({ error: exErr.message }), { status: 500 })
+      res.status(500).json({ error: exErr.message })
+      return
     }
-    if (!existing) return new Response('Not Found', { status: 404 })
+    if (!existing) {
+      res.status(404).json({ error: 'Not Found' })
+      return
+    }
     const { error } = await supabase
       .from('products')
       .update(productToRow(body.product))
       .eq('id', body.product.id)
     if (error) {
       console.error(error)
-      return new Response(JSON.stringify({ error: error.message }), { status: 500 })
+      res.status(500).json({ error: error.message })
+      return
     }
     const list = await listProducts(supabase)
-    return Response.json(list)
+    res.status(200).json(list)
+    return
   }
 
   if (req.method === 'DELETE') {
-    const body = (await req.json().catch(() => null)) as { id?: string } | null
+    const body = parseJsonBody(req) as { id?: string } | null
     const id = body?.id
-    if (!id) return new Response('Bad Request', { status: 400 })
+    if (!id) {
+      res.status(400).json({ error: 'Bad Request' })
+      return
+    }
     const { error } = await supabase.from('products').delete().eq('id', id)
     if (error) {
       console.error(error)
-      return new Response(JSON.stringify({ error: error.message }), { status: 500 })
+      res.status(500).json({ error: error.message })
+      return
     }
     const list = await listProducts(supabase)
-    return Response.json(list)
+    res.status(200).json(list)
+    return
   }
 
-  return new Response('Method Not Allowed', { status: 405 })
+  res.status(405).send('Method Not Allowed')
 }

@@ -42,7 +42,7 @@ function renderCatalogPage(root: HTMLElement): void {
     <header class="site-header">
       <div class="header-inner">
         <h1 class="logo">Frutos secos</h1>
-        <p class="tagline">Catálogo simple · precios orientativos</p>
+        <p class="tagline">Catálogo · frutos secos y más</p>
       </div>
     </header>
     <main class="main">

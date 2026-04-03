@@ -7,9 +7,25 @@ function authHeader(auth: AdminAuth): string {
   return `Basic ${token}`
 }
 
+async function readErrorMessage(res: Response): Promise<string> {
+  try {
+    const j: unknown = await res.json()
+    if (j && typeof j === 'object') {
+      const o = j as Record<string, unknown>
+      const d = o.details
+      const e = o.error
+      if (typeof d === 'string' && d) return d
+      if (typeof e === 'string' && e) return e
+    }
+  } catch {
+    /* ignore */
+  }
+  return 'No se pudo cargar el catálogo'
+}
+
 export async function apiListProducts(): Promise<Product[]> {
   const res = await fetch('/api/products', { method: 'GET' })
-  if (!res.ok) throw new Error('No se pudo cargar el catálogo')
+  if (!res.ok) throw new Error(await readErrorMessage(res))
   const data: unknown = await res.json()
   if (!Array.isArray(data)) return []
   return data as Product[]
