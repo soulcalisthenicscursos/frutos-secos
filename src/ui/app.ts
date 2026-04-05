@@ -41,8 +41,8 @@ function renderCatalogPage(root: HTMLElement): void {
   root.innerHTML = `
     <header class="site-header">
       <div class="header-inner">
-        <h1 class="logo">Frutos secos</h1>
-        <p class="tagline">Catálogo · frutos secos y más</p>
+        <h1 class="logo">Soul Productos</h1>
+        <p class="tagline">Catálogo</p>
       </div>
     </header>
     <main class="main">
