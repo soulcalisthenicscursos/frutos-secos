@@ -2,7 +2,7 @@
  * Runtime Edge: sin @vercel/node.
  * Logs: Vercel → proyecto → Logs → filtrar "catalog-api" (nunca logueamos secretos).
  */
-export const config = { runtime: 'edge' as const }
+export const config = { runtime: 'edge' }
 
 const TAG = 'catalog-api'
 
