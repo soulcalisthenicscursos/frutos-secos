@@ -170,18 +170,23 @@ function renderGestionPage(root: HTMLElement): void {
       <section class="panel" id="admin-panel" hidden>
         <h2 class="panel-title">Productos</h2>
         <ul id="admin-list" class="admin-list"></ul>
-        <h3 id="form-title" class="form-section-title">Nuevo producto</h3>
-        <form id="product-form" class="product-form">
-          <label>Nombre <input name="name" type="text" required autocomplete="off" /></label>
-          <label>Precio (ARS) <input name="price" type="number" min="0" step="1" required /></label>
-          <label>Categoría <input name="category" type="text" placeholder="Ej. Almendras" /></label>
-          <label>URL de imagen <input name="imageUrl" type="text" required placeholder="https://..." inputmode="url" /></label>
-          <label>Descripción <textarea name="description" rows="4"></textarea></label>
-          <div class="form-actions">
-            <button type="submit" class="btn btn-primary" id="submit-product">Guardar</button>
-            <button type="button" class="btn btn-ghost" id="cancel-edit" hidden>Cancelar edición</button>
-          </div>
-        </form>
+        <div class="admin-toolbar" id="admin-form-toolbar">
+          <button type="button" class="btn btn-primary" id="btn-new-product">Crear producto</button>
+        </div>
+        <div id="product-form-section" hidden>
+          <h3 id="form-title" class="form-section-title">Nuevo producto</h3>
+          <form id="product-form" class="product-form">
+            <label>Nombre <input name="name" type="text" required autocomplete="off" /></label>
+            <label>Precio (ARS) <input name="price" type="number" min="0" step="1" required /></label>
+            <label>Categoría <input name="category" type="text" placeholder="Ej. Almendras" /></label>
+            <label>URL de imagen <input name="imageUrl" type="text" required placeholder="https://..." inputmode="url" /></label>
+            <label>Descripción <textarea name="description" rows="4"></textarea></label>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary" id="submit-product">Guardar</button>
+              <button type="button" class="btn btn-ghost" id="cancel-form">Cancelar</button>
+            </div>
+          </form>
+        </div>
       </section>
     </main>
   `
@@ -190,11 +195,42 @@ function renderGestionPage(root: HTMLElement): void {
   const authPanel = root.querySelector<HTMLElement>('#auth-panel')!
   const adminPanel = root.querySelector<HTMLElement>('#admin-panel')!
   const adminList = root.querySelector<HTMLElement>('#admin-list')!
+  const formSection = root.querySelector<HTMLElement>('#product-form-section')!
+  const formToolbar = root.querySelector<HTMLElement>('#admin-form-toolbar')!
+  const btnNewProduct = root.querySelector<HTMLButtonElement>('#btn-new-product')!
   const form = root.querySelector<HTMLFormElement>('#product-form')!
-  const cancelEdit = root.querySelector<HTMLButtonElement>('#cancel-edit')!
+  const cancelForm = root.querySelector<HTMLButtonElement>('#cancel-form')!
 
   let auth: AdminAuth | null = null
   let editingId: string | null = null
+
+  function setFormOpen(open: boolean): void {
+    formSection.hidden = !open
+    formToolbar.hidden = open
+  }
+
+  function openProductFormNew(): void {
+    editingId = null
+    form.reset()
+    fillForm(null)
+    root.querySelector('#form-title')!.textContent = 'Nuevo producto'
+    setFormOpen(true)
+  }
+
+  function openProductFormEdit(p: Product): void {
+    editingId = p.id
+    fillForm(p)
+    root.querySelector('#form-title')!.textContent = 'Editar producto'
+    setFormOpen(true)
+  }
+
+  function closeProductForm(): void {
+    editingId = null
+    form.reset()
+    fillForm(null)
+    root.querySelector('#form-title')!.textContent = 'Nuevo producto'
+    setFormOpen(false)
+  }
 
   function renderAdminList(): void {
     if (!products.length) {
@@ -280,6 +316,7 @@ function renderGestionPage(root: HTMLElement): void {
       if (!confirm('¿Borrar este producto?')) return
       try {
         products = await apiDeleteProduct(auth, id)
+        if (editingId === id) closeProductForm()
         renderAdminList()
       } catch (err) {
         alert(err instanceof Error ? err.message : 'No se pudo borrar')
@@ -290,12 +327,11 @@ function renderGestionPage(root: HTMLElement): void {
     if (action === 'edit') {
       const p = products.find((x) => x.id === id)
       if (!p) return
-      editingId = id
-      fillForm(p)
-      cancelEdit.hidden = false
-      root.querySelector('#form-title')!.textContent = 'Editar producto'
+      openProductFormEdit(p)
     }
   })
+
+  btnNewProduct.addEventListener('click', () => openProductFormNew())
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault()
@@ -309,23 +345,14 @@ function renderGestionPage(root: HTMLElement): void {
       products = editingId
         ? await apiUpdateProduct(auth, next)
         : await apiCreateProduct(auth, next)
-      editingId = null
-      cancelEdit.hidden = true
-      root.querySelector('#form-title')!.textContent = 'Nuevo producto'
-      form.reset()
-      fillForm(null)
+      closeProductForm()
       renderAdminList()
     } catch (err2) {
       alert(err2 instanceof Error ? err2.message : 'No se pudo guardar')
     }
   })
 
-  cancelEdit.addEventListener('click', () => {
-    editingId = null
-    fillForm(null)
-    cancelEdit.hidden = true
-    root.querySelector('#form-title')!.textContent = 'Nuevo producto'
-  })
+  cancelForm.addEventListener('click', () => closeProductForm())
 }
 
 function wireSpaLinks(root: HTMLElement): void {
