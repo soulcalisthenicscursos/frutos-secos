@@ -1,12 +1,8 @@
 /**
- * Un solo archivo: evita que el bundler de Vercel falle al resolver imports locales (FUNCTION_INVOCATION_FAILED).
- * Supabase solo vía fetch → PostgREST.
+ * Runtime Edge: sin @vercel/node (evita crashes de invocación en Vercel).
+ * Supabase vía fetch → PostgREST.
  */
-import type { VercelRequest, VercelResponse } from '@vercel/node'
-
-export const config = {
-  runtime: 'nodejs20.x' as const,
-}
+export const config = { runtime: 'edge' as const }
 
 interface Product {
   id: string
@@ -85,10 +81,24 @@ function rowToProduct(row: Row): Product {
   }
 }
 
+function sanitizeSecret(raw: string): string {
+  let s = raw.trim()
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1)
+  }
+  if (s.toLowerCase().startsWith('bearer ')) s = s.slice(7).trim()
+  return s.trim()
+}
+
 function getEnv(): { baseUrl: string; key: string } {
   const raw = process.env.SUPABASE_URL?.trim()
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
-  if (!raw || !key) throw new Error('MISSING_SUPABASE_ENV')
+  const keyRaw = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!raw || keyRaw == null || keyRaw === '') throw new Error('MISSING_SUPABASE_ENV')
+  const key = sanitizeSecret(keyRaw)
+  if (!key) throw new Error('MISSING_SUPABASE_ENV')
   const baseUrl = raw.replace(/\/+$/, '')
   if (!baseUrl.startsWith('https://')) {
     throw new Error('SUPABASE_URL inválida')
@@ -100,6 +110,9 @@ function hdr(key: string, extra?: Record<string, string>): Record<string, string
   return {
     apikey: key,
     Authorization: `Bearer ${key}`,
+    Accept: 'application/json',
+    'Accept-Profile': 'public',
+    'Content-Profile': 'public',
     ...extra,
   }
 }
@@ -213,26 +226,28 @@ class AuthErr extends Error {
   }
 }
 
-function requireAuth(req: VercelRequest): void {
+function requireAuth(request: Request): void {
   const user = process.env.ADMIN_USER ?? ''
   const pass = process.env.ADMIN_PASS ?? ''
   if (!user || !pass) throw new AuthErr(500, 'Faltan ADMIN_USER y ADMIN_PASS en Vercel')
-  const h = req.headers.authorization ?? ''
+  const h = request.headers.get('authorization') ?? ''
   const [scheme, token] = h.split(' ')
   if (scheme !== 'Basic' || !token) {
     throw new AuthErr(401, 'Unauthorized', {
       'www-authenticate': 'Basic realm="gestion"',
     })
   }
-  let decoded = ''
+  let decoded: string
   try {
-    decoded = Buffer.from(token, 'base64').toString('utf8')
+    decoded = atob(token)
   } catch {
     throw new AuthErr(401, 'Unauthorized', {
       'www-authenticate': 'Basic realm="gestion"',
     })
   }
-  const [u, p] = decoded.split(':')
+  const i = decoded.indexOf(':')
+  const u = i === -1 ? decoded : decoded.slice(0, i)
+  const p = i === -1 ? '' : decoded.slice(i + 1)
   if (u !== user || p !== pass) {
     throw new AuthErr(401, 'Unauthorized', {
       'www-authenticate': 'Basic realm="gestion"',
@@ -240,17 +255,12 @@ function requireAuth(req: VercelRequest): void {
   }
 }
 
-function parseBody(req: VercelRequest): unknown {
-  if (req.body == null) return null
-  if (typeof req.body === 'object') return req.body
-  if (typeof req.body === 'string') {
-    try {
-      return JSON.parse(req.body) as unknown
-    } catch {
-      return null
-    }
+function json(data: unknown, status = 200, headers?: Record<string, string>): Response {
+  const h = new Headers({ 'content-type': 'application/json; charset=utf-8' })
+  if (headers) {
+    for (const [k, v] of Object.entries(headers)) h.set(k, v)
   }
-  return null
+  return new Response(JSON.stringify(data), { status, headers: h })
 }
 
 function strErr(e: unknown): string {
@@ -258,10 +268,7 @@ function strErr(e: unknown): string {
   return String(e)
 }
 
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-): Promise<void> {
+export default async function handler(request: Request): Promise<Response> {
   try {
     let base: string
     let key: string
@@ -271,105 +278,90 @@ export default async function handler(
       key = e.key
     } catch (e) {
       if (e instanceof Error && e.message === 'MISSING_SUPABASE_ENV') {
-        res.status(500).json({
-          error:
-            'Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en Vercel (Environment Variables).',
-        })
-        return
+        return json(
+          {
+            error:
+              'Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en Vercel (Environment Variables).',
+          },
+          500
+        )
       }
-      res.status(500).json({ error: strErr(e) })
-      return
+      return json({ error: strErr(e) }, 500)
     }
 
-    if (req.method === 'GET') {
+    if (request.method === 'GET') {
       try {
         await seedIfEmpty(base, key)
         const list = await listProducts(base, key)
-        res.status(200).json(list)
+        return json(list, 200)
       } catch (e) {
-        console.error(e)
-        res.status(500).json({
-          error:
-            'Error al leer Supabase. Ejecutá supabase/migrations/001_products.sql y revisá la service_role JWT (eyJ…).',
-          details: strErr(e),
-        })
+        return json(
+          {
+            error:
+              'Error de Supabase/PostgREST. Revisá: tabla public.products (SQL), clave service_role JWT (eyJ…), y que la URL sea https://xxx.supabase.co',
+            details: strErr(e),
+          },
+          500
+        )
       }
-      return
     }
 
     try {
-      requireAuth(req)
+      requireAuth(request)
     } catch (e) {
       if (e instanceof AuthErr) {
-        if (e.extra) {
-          for (const [k, v] of Object.entries(e.extra)) res.setHeader(k, v)
-        }
-        res.status(e.code).json({ error: e.message })
-        return
+        const h: Record<string, string> = {}
+        if (e.extra) Object.assign(h, e.extra)
+        return json({ error: e.message }, e.code, h)
       }
-      res.status(500).json({ error: strErr(e) })
-      return
+      return json({ error: strErr(e) }, 500)
     }
 
-    if (req.method === 'POST') {
-      const body = parseBody(req) as { product?: Product } | null
-      if (!body?.product) {
-        res.status(400).json({ error: 'Bad Request' })
-        return
-      }
+    let body: unknown
+    try {
+      body = await request.json()
+    } catch {
+      body = null
+    }
+
+    if (request.method === 'POST') {
+      const b = body as { product?: Product } | null
+      if (!b?.product) return json({ error: 'Bad Request' }, 400)
       try {
-        await upsert(base, key, productToRow(body.product))
-        res.status(200).json(await listProducts(base, key))
+        await upsert(base, key, productToRow(b.product))
+        return json(await listProducts(base, key), 200)
       } catch (e) {
-        res.status(500).json({ error: strErr(e), details: strErr(e) })
+        return json({ error: strErr(e), details: strErr(e) }, 500)
       }
-      return
     }
 
-    if (req.method === 'PUT') {
-      const body = parseBody(req) as { product?: Product } | null
-      if (!body?.product) {
-        res.status(400).json({ error: 'Bad Request' })
-        return
-      }
+    if (request.method === 'PUT') {
+      const b = body as { product?: Product } | null
+      if (!b?.product) return json({ error: 'Bad Request' }, 400)
       try {
-        const ok = await existsId(base, key, body.product.id)
-        if (!ok) {
-          res.status(404).json({ error: 'Not Found' })
-          return
-        }
-        await patchProduct(base, key, body.product.id, productToRow(body.product))
-        res.status(200).json(await listProducts(base, key))
+        const ok = await existsId(base, key, b.product.id)
+        if (!ok) return json({ error: 'Not Found' }, 404)
+        await patchProduct(base, key, b.product.id, productToRow(b.product))
+        return json(await listProducts(base, key), 200)
       } catch (e) {
-        res.status(500).json({ error: strErr(e) })
+        return json({ error: strErr(e) }, 500)
       }
-      return
     }
 
-    if (req.method === 'DELETE') {
-      const body = parseBody(req) as { id?: string } | null
-      const id = body?.id
-      if (!id) {
-        res.status(400).json({ error: 'Bad Request' })
-        return
-      }
+    if (request.method === 'DELETE') {
+      const b = body as { id?: string } | null
+      const id = b?.id
+      if (!id) return json({ error: 'Bad Request' }, 400)
       try {
         await delProduct(base, key, id)
-        res.status(200).json(await listProducts(base, key))
+        return json(await listProducts(base, key), 200)
       } catch (e) {
-        res.status(500).json({ error: strErr(e) })
+        return json({ error: strErr(e) }, 500)
       }
-      return
     }
 
-    res.status(405).send('Method Not Allowed')
+    return new Response('Method Not Allowed', { status: 405 })
   } catch (e) {
-    console.error('api/products fatal', e)
-    try {
-      res.status(500).json({ error: 'Error interno', details: strErr(e) })
-    } catch {
-      res.statusCode = 500
-      res.end('Internal Server Error')
-    }
+    return json({ error: 'Error interno', details: strErr(e) }, 500)
   }
 }
