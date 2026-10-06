@@ -341,41 +341,54 @@ class AuthErr extends Error {
   }
 }
 
+function trimEnv(raw: string | undefined): string {
+  let s = (raw ?? '').trim()
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim()
+  }
+  return s
+}
+
+function decodeBasicToken(token: string): string {
+  const binary = atob(token)
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+  return new TextDecoder().decode(bytes)
+}
+
 function requireAuth(ctx: Ctx, request: Request): void {
-  const user = process.env.ADMIN_USER ?? ''
-  const pass = process.env.ADMIN_PASS ?? ''
+  const user = trimEnv(process.env.ADMIN_USER)
+  const pass = trimEnv(process.env.ADMIN_PASS)
   log(ctx, 'auth_check', {
     adminUserLen: user.length,
     adminPassLen: pass.length,
   })
   if (!user || !pass) throw new AuthErr(500, 'Faltan ADMIN_USER y ADMIN_PASS en Vercel')
-  const h = request.headers.get('authorization') ?? ''
+  const h =
+    request.headers.get('x-catalog-auth') ?? request.headers.get('authorization') ?? ''
   const hasBasic = h.startsWith('Basic ')
-  log(ctx, 'auth_header', { hasBasic: hasBasic ? 1 : 0 })
+  log(ctx, 'auth_header', {
+    hasBasic: hasBasic ? 1 : 0,
+    viaCustomHeader: request.headers.get('x-catalog-auth') ? 1 : 0,
+  })
   const [scheme, token] = h.split(' ')
   if (scheme !== 'Basic' || !token) {
-    throw new AuthErr(401, 'Unauthorized', {
-      'www-authenticate': 'Basic realm="gestion"',
-    })
+    throw new AuthErr(401, 'Usuario o contraseña incorrectos')
   }
   let decoded: string
   try {
-    decoded = atob(token)
+    decoded = decodeBasicToken(token)
   } catch {
-    throw new AuthErr(401, 'Unauthorized', {
-      'www-authenticate': 'Basic realm="gestion"',
-    })
+    throw new AuthErr(401, 'Usuario o contraseña incorrectos')
   }
   const i = decoded.indexOf(':')
   const u = i === -1 ? decoded : decoded.slice(0, i)
   const p = i === -1 ? '' : decoded.slice(i + 1)
   const ok = u === user && p === pass
   log(ctx, 'auth_result', { ok: ok ? 1 : 0 })
-  if (!ok) {
-    throw new AuthErr(401, 'Unauthorized', {
-      'www-authenticate': 'Basic realm="gestion"',
-    })
-  }
+  if (!ok) throw new AuthErr(401, 'Usuario o contraseña incorrectos')
 }
 
 function jsonResponse(
@@ -473,7 +486,11 @@ export default async function handler(request: Request): Promise<Response> {
     })
 
     if (request.method === 'POST') {
-      const b = body as { product?: Product } | null
+      const b = body as { product?: Product; ping?: boolean } | null
+      if (b?.ping === true) {
+        log(ctx, 'auth_ping_ok')
+        return respond(jsonResponse({ ok: true }))
+      }
       if (!b?.product) return respond(jsonResponse({ error: 'Bad Request' }, 400))
       try {
         await upsert(ctx, base, key, productToRow(b.product))

@@ -9,9 +9,15 @@ function uiLog(step: string, data?: Record<string, unknown>): void {
 
 export type AdminAuth = { user: string; pass: string }
 
-function authHeader(auth: AdminAuth): string {
-  const token = btoa(`${auth.user}:${auth.pass}`)
-  return `Basic ${token}`
+function encodeBasic(user: string, pass: string): string {
+  const bytes = new TextEncoder().encode(`${user}:${pass}`)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return `Basic ${btoa(binary)}`
+}
+
+function authHeaders(auth: AdminAuth): Record<string, string> {
+  return { 'x-catalog-auth': encodeBasic(auth.user.trim(), auth.pass) }
 }
 
 async function readErrorMessage(res: Response): Promise<string> {
@@ -63,13 +69,31 @@ export async function apiListProducts(): Promise<Product[]> {
   return data as Product[]
 }
 
+export async function apiCheckAuth(auth: AdminAuth): Promise<void> {
+  uiLog('apiCheckAuth_start', {})
+  const res = await fetch('/api/products', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...authHeaders(auth),
+    },
+    body: JSON.stringify({ ping: true }),
+  })
+  uiLog('apiCheckAuth_response', {
+    status: res.status,
+    requestId: res.headers.get('x-catalog-request-id') ?? '',
+  })
+  if (res.status === 401) throw new Error('Usuario o contraseña incorrectos')
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+}
+
 export async function apiCreateProduct(auth: AdminAuth, product: Product): Promise<Product[]> {
   uiLog('apiCreateProduct_start', { id: product.id })
   const res = await fetch('/api/products', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      authorization: authHeader(auth),
+      ...authHeaders(auth),
     },
     body: JSON.stringify({ product }),
   })
@@ -88,7 +112,7 @@ export async function apiUpdateProduct(auth: AdminAuth, product: Product): Promi
     method: 'PUT',
     headers: {
       'content-type': 'application/json',
-      authorization: authHeader(auth),
+      ...authHeaders(auth),
     },
     body: JSON.stringify({ product }),
   })
@@ -107,7 +131,7 @@ export async function apiDeleteProduct(auth: AdminAuth, id: string): Promise<Pro
     method: 'DELETE',
     headers: {
       'content-type': 'application/json',
-      authorization: authHeader(auth),
+      ...authHeaders(auth),
     },
     body: JSON.stringify({ id }),
   })

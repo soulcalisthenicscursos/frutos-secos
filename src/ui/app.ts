@@ -1,6 +1,7 @@
 import type { Product } from '../types'
 import type { AdminAuth } from '../api/products'
 import {
+  apiCheckAuth,
   apiCreateProduct,
   apiDeleteProduct,
   apiListProducts,
@@ -291,10 +292,8 @@ function renderGestionPage(root: HTMLElement): void {
     const user = (loginForm.elements.namedItem('user') as HTMLInputElement).value.trim()
     const pass = (loginForm.elements.namedItem('pass') as HTMLInputElement).value
     auth = { user, pass }
-    console.info(
-      '[catalog-ui] login_submit: primero GET /api/products (Supabase); usuario/pass solo para guardar'
-    )
     try {
+      await apiCheckAuth(auth)
       products = await apiListProducts()
       authPanel.hidden = true
       adminPanel.hidden = false
